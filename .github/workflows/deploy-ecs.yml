@@ -1,0 +1,161 @@
+name: Deploy to Alibaba Cloud ECS
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.mdx"
+      - ".agents/**"
+      - "skills/**"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ecs
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  ECS_REGION: cn-hongkong
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+      contents: read
+    outputs:
+      image: ${{ steps.image-ref.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Pre-pull BuildKit image
+        shell: bash
+        env:
+          BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if docker pull "${BUILDKIT_IMAGE}"; then exit 0; fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image ref
+        id: image-ref
+        run: echo "value=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            OPENCLAW_EXTENSIONS=diagnostics-otel,codex
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-${{ github.sha }}
+          cache-from: type=gha,scope=deploy-ecs-amd64
+          cache-to: type=gha,mode=max,scope=deploy-ecs-amd64
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Alibaba Cloud CLI
+        run: |
+          set -euo pipefail
+          curl -sL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz \
+            -o /tmp/aliyun-cli.tgz
+          tar xzf /tmp/aliyun-cli.tgz -C /tmp
+          sudo mv /tmp/aliyun /usr/local/bin/
+          rm -f /tmp/aliyun-cli.tgz
+          aliyun configure set --profile default --mode AK \
+            --access-key-id "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}" \
+            --access-key-secret "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}" \
+            --region "${{ env.ECS_REGION }}"
+
+      - name: Deploy to ECS via RunCommand
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}
+          GHCR_USER: ${{ github.repository_owner }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+
+          # Build the deploy script that runs on the ECS instance.
+          # GHCR_DEPLOY_TOKEN is a GitHub PAT with read:packages scope,
+          # stored as a GitHub Actions secret and passed here for docker login.
+          DEPLOY_SCRIPT="#!/bin/bash
+          set -euxo pipefail
+          echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin
+          docker pull '${IMAGE}'
+          docker stop openclaw 2>/dev/null || true
+          docker rm openclaw 2>/dev/null || true
+          mkdir -p /opt/data/openclaw /opt/data/openclaw-workspace
+          docker run -d \\
+            --name openclaw \\
+            --restart always \\
+            -p 8080:8080 \\
+            -v /opt/data/openclaw:/home/node/.openclaw \\
+            -v /opt/data/openclaw-workspace:/home/node/.openclaw/workspace \\
+            -e NODE_ENV=production \\
+            -e OPENCLAW_GATEWAY_PORT=8080 \\
+            '${IMAGE}'
+          docker image prune -f
+          echo '=== DEPLOY COMPLETE ==='
+          docker ps --filter name=openclaw --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+          "
+
+          INVOKE_RESULT=$(aliyun ecs RunCommand \
+            --RegionId "${ECS_REGION}" \
+            --Type RunShellScript \
+            --CommandContent "${DEPLOY_SCRIPT}" \
+            --InstanceId.1 "${INSTANCE_ID}" \
+            --Timeout 300 \
+            --Name "gha-deploy-${GITHUB_SHA:0:7}")
+
+          INVOKE_ID=$(echo "${INVOKE_RESULT}" | jq -r '.InvokeId')
+          echo "InvokeId: ${INVOKE_ID}"
+
+          for i in $(seq 1 30); do
+            sleep 10
+            RESULT=$(aliyun ecs DescribeInvocationResults \
+              --RegionId "${ECS_REGION}" \
+              --InvokeId "${INVOKE_ID}")
+            STATUS=$(echo "${RESULT}" | \
+              jq -r '.Invocation.InvocationResults.InvocationResult[0].InvocationStatus')
+            echo "[${i}] Status: ${STATUS}"
+            if [ "${STATUS}" != "Running" ]; then
+              OUTPUT=$(echo "${RESULT}" | \
+                jq -r '.Invocation.InvocationResults.InvocationResult[0].Output // ""' | \
+                base64 -d 2>/dev/null || echo "(no output)")
+              echo "${OUTPUT}"
+              if [ "${STATUS}" = "Success" ]; then
+                echo "Deployment successful!"
+                exit 0
+              else
+                echo "::error::Deployment failed with status: ${STATUS}"
+                exit 1
+              fi
+            fi
+          done
+          echo "::error::Deployment timed out after 300s"
+          exit 1
