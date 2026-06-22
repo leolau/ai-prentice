@@ -116,6 +116,9 @@ jobs:
           docker run -d \\
             --name openclaw \\
             --restart always \\
+            --health-cmd 'curl -sf http://127.0.0.1:8080/health || exit 1' \\
+            --health-interval 180s \\
+            --health-start-period 30s \\
             -p 8080:8080 \\
             -v /opt/data/openclaw:/home/node/.openclaw \\
             -v /opt/data/openclaw-workspace:/home/node/.openclaw/workspace \\
