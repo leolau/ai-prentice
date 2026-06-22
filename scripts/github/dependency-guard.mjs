@@ -63,7 +63,9 @@ function isExcludedFromDependencyGuard(filename) {
 }
 
 export function isDependencyFile(filename) {
-  if (isExcludedFromDependencyGuard(filename)) return false;
+  if (isExcludedFromDependencyGuard(filename)) {
+    return false;
+  }
   return (
     filename.endsWith("package-lock.json") ||
     filename.endsWith("npm-shrinkwrap.json") ||
@@ -74,7 +76,9 @@ export function isDependencyFile(filename) {
 }
 
 export function isDependencyManifest(filename) {
-  if (isExcludedFromDependencyGuard(filename)) return false;
+  if (isExcludedFromDependencyGuard(filename)) {
+    return false;
+  }
   return filename.endsWith("package.json");
 }
 
