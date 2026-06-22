@@ -100,6 +100,7 @@ jobs:
           IMAGE: ${{ needs.build.outputs.image }}
           INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
           GW_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           set -euo pipefail
 
@@ -150,6 +151,7 @@ jobs:
             -e NODE_ENV=production \\
             -e OPENCLAW_GATEWAY_PORT=8080 \\
             -e OPENCLAW_GATEWAY_TOKEN='${GW_TOKEN}' \\
+            -e DEEPSEEK_API_KEY='${DEEPSEEK_KEY}' \\
             '${IMAGE}' \\
             node openclaw.mjs gateway --allow-unconfigured
           docker image prune -f
