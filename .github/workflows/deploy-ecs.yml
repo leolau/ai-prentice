@@ -76,6 +76,8 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      packages: read
     steps:
       - name: Install Alibaba Cloud CLI
         run: |
@@ -93,7 +95,7 @@ jobs:
       - name: Deploy to ECS via RunCommand
         shell: bash
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.repository_owner }}
           IMAGE: ${{ needs.build.outputs.image }}
           INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
@@ -101,8 +103,9 @@ jobs:
           set -euo pipefail
 
           # Build the deploy script that runs on the ECS instance.
-          # GHCR_DEPLOY_TOKEN is a GitHub PAT with read:packages scope,
-          # stored as a GitHub Actions secret and passed here for docker login.
+          # GITHUB_TOKEN is used for docker login to ghcr.io.
+          # It is short-lived (valid only during this workflow run) but sufficient
+          # for pulling the image that the build job just pushed.
           DEPLOY_SCRIPT="#!/bin/bash
           set -euxo pipefail
           echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin
