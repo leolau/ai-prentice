@@ -105,6 +105,19 @@ jobs:
 
           # GITHUB_TOKEN authenticates the ghcr.io pull on the ECS instance.
           # The container runs as uid 1000 (node); volumes must match.
+          # ECS_PUBLIC_IP is the instance's public IP for Control UI origin policy.
+          ECS_PUBLIC_IP=$(aliyun ecs DescribeInstances \
+            --RegionId "${ECS_REGION}" \
+            --InstanceIds "[\"${INSTANCE_ID}\"]" \
+            | jq -r '.Instances.Instance[0].PublicIpAddress.IpAddress[0] // empty')
+          if [ -z "${ECS_PUBLIC_IP}" ]; then
+            ECS_PUBLIC_IP=$(aliyun ecs DescribeInstances \
+              --RegionId "${ECS_REGION}" \
+              --InstanceIds "[\"${INSTANCE_ID}\"]" \
+              | jq -r '.Instances.Instance[0].EipAddress.IpAddress // empty')
+          fi
+          echo "ECS public IP: ${ECS_PUBLIC_IP:-unknown}"
+
           DEPLOY_SCRIPT="#!/bin/bash
           set -euxo pipefail
           echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin
@@ -113,6 +126,18 @@ jobs:
           docker rm openclaw 2>/dev/null || true
           mkdir -p /opt/data/openclaw /opt/data/openclaw-workspace
           chown -R 1000:1000 /opt/data/openclaw /opt/data/openclaw-workspace
+
+          # Seed gateway config for Control UI access from public IP.
+          # dangerouslyDisableDeviceAuth bypasses WebCrypto device identity
+          # checks so the dashboard works over plain HTTP. For production use
+          # HTTPS (Caddy/Nginx + Let's Encrypt) and remove this flag.
+          # Preserves any existing config; only writes if missing.
+          if [ ! -f /opt/data/openclaw/openclaw.json ]; then
+            printf '{\"gateway\":{\"controlUi\":{\"enabled\":true,\"allowedOrigins\":[\"http://${ECS_PUBLIC_IP:-0.0.0.0}:8080\"],\"allowInsecureAuth\":true,\"dangerouslyDisableDeviceAuth\":true}}}' \
+              > /opt/data/openclaw/openclaw.json
+            chown 1000:1000 /opt/data/openclaw/openclaw.json
+          fi
+
           docker run -d \\
             --name openclaw \\
             --restart always \\
