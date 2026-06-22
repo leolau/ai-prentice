@@ -66,7 +66,7 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            OPENCLAW_EXTENSIONS=diagnostics-otel,codex,deepseek
+            OPENCLAW_EXTENSIONS=diagnostics-otel,codex
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-${{ github.sha }}
@@ -154,6 +154,16 @@ jobs:
             -e DEEPSEEK_API_KEY='${DEEPSEEK_KEY}' \\
             '${IMAGE}' \\
             node openclaw.mjs gateway --allow-unconfigured
+          # Install external official plugins that are not bundled in the
+          # Docker image (bundledDist: false in their package.json). The npm
+          # project directory is persisted on the /opt/data/openclaw volume so
+          # plugins survive container restarts without re-downloading.
+          docker exec openclaw openclaw plugins install @openclaw/deepseek-provider 2>&1 || true
+
+          # Restart the gateway so newly installed plugins are loaded.
+          docker restart openclaw
+          sleep 10
+
           docker image prune -f
           echo '=== DEPLOY COMPLETE ==='
           docker ps --filter name=openclaw --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
