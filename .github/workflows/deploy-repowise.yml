@@ -76,7 +76,7 @@ jobs:
           Type=simple
           User=root
           WorkingDirectory=/opt/repowise/repos/ai-prentice
-          ExecStart=/opt/repowise/venv/bin/repowise serve --host 0.0.0.0 --port 3000 --no-ui
+          ExecStart=/opt/repowise/venv/bin/repowise serve --host 0.0.0.0 --port 7337 --ui-port 3000
           Restart=always
           RestartSec=5
           Environment=PATH=/opt/repowise/venv/bin:/usr/local/bin:/usr/bin:/bin
