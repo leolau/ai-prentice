@@ -1,0 +1,116 @@
+name: Deploy AgentDoc to ECS
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Rebuild weekly to pick up upstream AgentDoc changes (Sundays 04:00 UTC)
+    - cron: "0 4 * * 0"
+
+concurrency:
+  group: deploy-agentdoc
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ECS_REGION: cn-hongkong
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Alibaba Cloud CLI
+        run: |
+          set -euo pipefail
+          curl -sL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz \
+            -o /tmp/aliyun-cli.tgz
+          tar xzf /tmp/aliyun-cli.tgz -C /tmp
+          sudo mv /tmp/aliyun /usr/local/bin/
+          rm -f /tmp/aliyun-cli.tgz
+          aliyun configure set --profile default --mode AK \
+            --access-key-id "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}" \
+            --access-key-secret "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}" \
+            --region "${{ env.ECS_REGION }}"
+
+      - name: Deploy AgentDoc to ECS
+        env:
+          INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+
+          DEPLOY_SCRIPT='#!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          mkdir -p /opt/apps
+          cd /opt/apps
+
+          if [ -d "AgentDoc" ]; then
+            cd AgentDoc && git pull origin main
+          else
+            git clone https://github.com/jonverrier/AgentDoc.git
+            cd AgentDoc
+          fi
+
+          npm install 2>&1
+          npm run build 2>&1
+
+          cat > /etc/systemd/system/agentdoc.service <<SVC
+          [Unit]
+          Description=AgentDoc MCP Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/opt/apps/AgentDoc
+          ExecStart=/usr/bin/node dist/src/index.js /opt/apps
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+
+          systemctl daemon-reload
+          systemctl enable agentdoc
+          systemctl restart agentdoc
+          sleep 2
+          echo "=== AGENTDOC DEPLOY COMPLETE ==="
+          systemctl status agentdoc --no-pager || true
+          '
+
+          INVOKE_RESULT=$(aliyun ecs RunCommand \
+            --RegionId "${ECS_REGION}" \
+            --Type RunShellScript \
+            --CommandContent "${DEPLOY_SCRIPT}" \
+            --InstanceId.1 "${INSTANCE_ID}" \
+            --Timeout 300 \
+            --Name "gha-deploy-agentdoc-$(date +%s)")
+
+          INVOKE_ID=$(echo "${INVOKE_RESULT}" | jq -r '.InvokeId')
+          echo "InvokeId: ${INVOKE_ID}"
+
+          for i in $(seq 1 30); do
+            sleep 10
+            RESULT=$(aliyun ecs DescribeInvocationResults \
+              --RegionId "${ECS_REGION}" \
+              --InvokeId "${INVOKE_ID}")
+            STATUS=$(echo "${RESULT}" | \
+              jq -r '.Invocation.InvocationResults.InvocationResult[0].InvocationStatus')
+            echo "[${i}] Status: ${STATUS}"
+            if [ "${STATUS}" != "Running" ]; then
+              OUTPUT=$(echo "${RESULT}" | \
+                jq -r '.Invocation.InvocationResults.InvocationResult[0].Output // ""' | \
+                base64 -d 2>/dev/null || echo "(no output)")
+              echo "${OUTPUT}"
+              if [ "${STATUS}" = "Success" ]; then
+                echo "Deployment successful!"
+                exit 0
+              else
+                echo "::error::Deployment failed with status: ${STATUS}"
+                exit 1
+              fi
+            fi
+          done
+          echo "::error::Deployment timed out"
+          exit 1
