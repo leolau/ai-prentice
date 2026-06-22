@@ -99,13 +99,12 @@ jobs:
           GHCR_USER: ${{ github.repository_owner }}
           IMAGE: ${{ needs.build.outputs.image }}
           INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
+          GW_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
         run: |
           set -euo pipefail
 
-          # Build the deploy script that runs on the ECS instance.
-          # GITHUB_TOKEN is used for docker login to ghcr.io.
-          # It is short-lived (valid only during this workflow run) but sufficient
-          # for pulling the image that the build job just pushed.
+          # GITHUB_TOKEN authenticates the ghcr.io pull on the ECS instance.
+          # The container runs as uid 1000 (node); volumes must match.
           DEPLOY_SCRIPT="#!/bin/bash
           set -euxo pipefail
           echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin
@@ -113,6 +112,7 @@ jobs:
           docker stop openclaw 2>/dev/null || true
           docker rm openclaw 2>/dev/null || true
           mkdir -p /opt/data/openclaw /opt/data/openclaw-workspace
+          chown -R 1000:1000 /opt/data/openclaw /opt/data/openclaw-workspace
           docker run -d \\
             --name openclaw \\
             --restart always \\
@@ -121,7 +121,9 @@ jobs:
             -v /opt/data/openclaw-workspace:/home/node/.openclaw/workspace \\
             -e NODE_ENV=production \\
             -e OPENCLAW_GATEWAY_PORT=8080 \\
-            '${IMAGE}'
+            -e OPENCLAW_GATEWAY_TOKEN='${GW_TOKEN}' \\
+            '${IMAGE}' \\
+            node openclaw.mjs gateway --allow-unconfigured
           docker image prune -f
           echo '=== DEPLOY COMPLETE ==='
           docker ps --filter name=openclaw --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
