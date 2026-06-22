@@ -123,8 +123,8 @@ function parseArgs(argv) {
 function readDiff(args, cwd = process.cwd()) {
   const range = args.noMergeBase ? `${args.base}..${args.head}` : `${args.base}...${args.head}`;
   const diffArgs = args.staged
-    ? ["diff", "--cached", "--unified=0", "--diff-filter=ACMR", "--"]
-    : ["diff", "--unified=0", "--diff-filter=ACMR", range, "--"];
+    ? ["diff", "--cached", "--unified=0", "--diff-filter=ACMR", "--", ":(exclude)hermes-agent"]
+    : ["diff", "--unified=0", "--diff-filter=ACMR", range, "--", ":(exclude)hermes-agent"];
   return execFileSync("git", diffArgs, {
     cwd,
     encoding: "utf8",
