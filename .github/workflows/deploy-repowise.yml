@@ -1,13 +1,13 @@
-name: Deploy AgentDoc to ECS
+name: Deploy Repowise to ECS
 
 on:
   workflow_dispatch:
   schedule:
-    # Rebuild weekly to pick up upstream AgentDoc changes (Sundays 04:00 UTC)
+    # Re-index weekly to pick up codebase changes (Sundays 04:00 UTC)
     - cron: "0 4 * * 0"
 
 concurrency:
-  group: deploy-agentdoc
+  group: deploy-repowise
   cancel-in-progress: true
 
 env:
@@ -31,7 +31,7 @@ jobs:
             --access-key-secret "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}" \
             --region "${{ env.ECS_REGION }}"
 
-      - name: Deploy AgentDoc to ECS
+      - name: Deploy Repowise to ECS
         env:
           INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
         run: |
@@ -41,42 +41,56 @@ jobs:
           set -euxo pipefail
           export DEBIAN_FRONTEND=noninteractive
 
-          mkdir -p /opt/apps
-          cd /opt/apps
+          # Ensure Python 3.11+ and pip are available
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-pip python3-venv git
 
-          if [ -d "AgentDoc" ]; then
-            cd AgentDoc && git pull origin main
+          # Install repowise in a dedicated venv
+          if [ ! -d "/opt/repowise/venv" ]; then
+            mkdir -p /opt/repowise
+            python3 -m venv /opt/repowise/venv
+          fi
+          /opt/repowise/venv/bin/pip install --upgrade pip
+          /opt/repowise/venv/bin/pip install --upgrade repowise
+
+          # Clone or update the target repo for indexing
+          mkdir -p /opt/repowise/repos
+          cd /opt/repowise/repos
+          if [ -d "ai-prentice" ]; then
+            cd ai-prentice && git pull origin main || true
           else
-            git clone https://github.com/jonverrier/AgentDoc.git
-            cd AgentDoc
+            git clone https://github.com/leolau/ai-prentice.git
+            cd ai-prentice
           fi
 
-          npm install 2>&1
-          npm run build 2>&1
+          # Run repowise init (index-only skips LLM stages, no API key needed)
+          /opt/repowise/venv/bin/repowise init --index-only --non-interactive 2>&1 || true
 
-          cat > /etc/systemd/system/agentdoc.service <<SVC
+          # Create systemd service for repowise serve
+          cat > /etc/systemd/system/repowise.service <<SVC
           [Unit]
-          Description=AgentDoc MCP Server
+          Description=Repowise MCP Server and Dashboard
           After=network.target
 
           [Service]
           Type=simple
           User=root
-          WorkingDirectory=/opt/apps/AgentDoc
-          ExecStart=/usr/bin/node dist/src/index.js /opt/apps
+          WorkingDirectory=/opt/repowise/repos/ai-prentice
+          ExecStart=/opt/repowise/venv/bin/repowise serve --host 0.0.0.0 --port 3000
           Restart=always
           RestartSec=5
+          Environment=PATH=/opt/repowise/venv/bin:/usr/local/bin:/usr/bin:/bin
 
           [Install]
           WantedBy=multi-user.target
           SVC
 
           systemctl daemon-reload
-          systemctl enable agentdoc
-          systemctl restart agentdoc
-          sleep 2
-          echo "=== AGENTDOC DEPLOY COMPLETE ==="
-          systemctl status agentdoc --no-pager || true
+          systemctl enable repowise
+          systemctl restart repowise
+          sleep 3
+          echo "=== REPOWISE DEPLOY COMPLETE ==="
+          systemctl status repowise --no-pager || true
           '
 
           INVOKE_RESULT=$(aliyun ecs RunCommand \
@@ -84,13 +98,13 @@ jobs:
             --Type RunShellScript \
             --CommandContent "${DEPLOY_SCRIPT}" \
             --InstanceId.1 "${INSTANCE_ID}" \
-            --Timeout 300 \
-            --Name "gha-deploy-agentdoc-$(date +%s)")
+            --Timeout 600 \
+            --Name "gha-deploy-repowise-$(date +%s)")
 
           INVOKE_ID=$(echo "${INVOKE_RESULT}" | jq -r '.InvokeId')
           echo "InvokeId: ${INVOKE_ID}"
 
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             sleep 10
             RESULT=$(aliyun ecs DescribeInvocationResults \
               --RegionId "${ECS_REGION}" \
