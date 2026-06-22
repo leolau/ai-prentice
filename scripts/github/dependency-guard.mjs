@@ -55,7 +55,17 @@ const dependencyManifestFields = [
   "libc",
 ];
 
+/** Directories excluded from dependency guards (upstream subtrees). */
+const EXCLUDED_DEPENDENCY_PREFIXES = ["hermes-agent/"];
+
+function isExcludedFromDependencyGuard(filename) {
+  return EXCLUDED_DEPENDENCY_PREFIXES.some((prefix) => filename.startsWith(prefix));
+}
+
 export function isDependencyFile(filename) {
+  if (isExcludedFromDependencyGuard(filename)) {
+    return false;
+  }
   return (
     filename.endsWith("package-lock.json") ||
     filename.endsWith("npm-shrinkwrap.json") ||
@@ -66,6 +76,9 @@ export function isDependencyFile(filename) {
 }
 
 export function isDependencyManifest(filename) {
+  if (isExcludedFromDependencyGuard(filename)) {
+    return false;
+  }
   return filename.endsWith("package.json");
 }
 

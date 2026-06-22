@@ -101,10 +101,19 @@ export function listTrackedFilesWithConflictMarkerCandidates(cwd = process.cwd()
 }
 
 /**
+ * Directories excluded from conflict marker checks (e.g. upstream subtrees).
+ */
+const EXCLUDED_PREFIXES = ["hermes-agent/"];
+
+/**
  * Finds merge conflict markers in tracked repository files.
  */
 export function findConflictMarkersInTrackedFiles(cwd = process.cwd()) {
-  return findConflictMarkersInFiles(listTrackedFilesWithConflictMarkerCandidates(cwd));
+  const candidates = listTrackedFilesWithConflictMarkerCandidates(cwd).filter((filePath) => {
+    const rel = path.relative(cwd, filePath);
+    return !EXCLUDED_PREFIXES.some((prefix) => rel.startsWith(prefix));
+  });
+  return findConflictMarkersInFiles(candidates);
 }
 
 /**
