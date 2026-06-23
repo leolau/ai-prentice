@@ -1,0 +1,136 @@
+name: Deploy Repowise to ECS
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Re-index weekly to pick up codebase changes (Sundays 04:00 UTC)
+    - cron: "0 4 * * 0"
+
+concurrency:
+  group: deploy-repowise
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ECS_REGION: cn-hongkong
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Alibaba Cloud CLI
+        run: |
+          set -euo pipefail
+          curl -sL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz \
+            -o /tmp/aliyun-cli.tgz
+          tar xzf /tmp/aliyun-cli.tgz -C /tmp
+          sudo mv /tmp/aliyun /usr/local/bin/
+          rm -f /tmp/aliyun-cli.tgz
+          aliyun configure set --profile default --mode AK \
+            --access-key-id "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}" \
+            --access-key-secret "${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}" \
+            --region "${{ env.ECS_REGION }}"
+
+      - name: Deploy Repowise to ECS
+        env:
+          INSTANCE_ID: ${{ secrets.ECS_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+
+          DEPLOY_SCRIPT='#!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Ensure Python 3.11+ and pip are available
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-pip python3-venv git
+
+          # Install repowise in a dedicated venv
+          if [ ! -d "/opt/repowise/venv" ]; then
+            mkdir -p /opt/repowise
+            python3 -m venv /opt/repowise/venv
+          fi
+          /opt/repowise/venv/bin/pip install --upgrade pip
+          /opt/repowise/venv/bin/pip install --upgrade repowise
+
+          # Clone or update the target repo for indexing
+          mkdir -p /opt/repowise/repos
+          cd /opt/repowise/repos
+          if [ -d "ai-prentice" ]; then
+            cd ai-prentice && git checkout develop 2>/dev/null || git checkout -b develop origin/develop
+            git pull origin develop || true
+          else
+            git clone -b develop https://github.com/leolau/ai-prentice.git
+            cd ai-prentice
+          fi
+
+          # Stop service during reindex to free memory on small instances
+          systemctl stop repowise 2>/dev/null || true
+
+          # Run repowise init (index-only skips LLM stages, no API key needed)
+          # --mode fast for large repos; --skip-tests/--skip-infra reduce memory
+          /opt/repowise/venv/bin/repowise init --index-only --mode fast --skip-tests --skip-infra -y 2>&1 || true
+
+          # Create systemd service for repowise serve
+          cat > /etc/systemd/system/repowise.service <<SVC
+          [Unit]
+          Description=Repowise MCP Server and Dashboard
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/opt/repowise/repos/ai-prentice
+          ExecStart=/opt/repowise/venv/bin/repowise serve --host 0.0.0.0 --port 7337 --ui-port 3000
+          Restart=always
+          RestartSec=5
+          Environment=PATH=/opt/repowise/venv/bin:/usr/local/bin:/usr/bin:/bin
+          Environment=REPOWISE_EMBEDDER=skip
+
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+
+          systemctl daemon-reload
+          systemctl enable repowise
+          systemctl restart repowise
+          sleep 3
+          echo "=== REPOWISE DEPLOY COMPLETE ==="
+          systemctl status repowise --no-pager || true
+          '
+
+          INVOKE_RESULT=$(aliyun ecs RunCommand \
+            --RegionId "${ECS_REGION}" \
+            --Type RunShellScript \
+            --CommandContent "${DEPLOY_SCRIPT}" \
+            --InstanceId.1 "${INSTANCE_ID}" \
+            --Timeout 1800 \
+            --Name "gha-deploy-repowise-$(date +%s)")
+
+          INVOKE_ID=$(echo "${INVOKE_RESULT}" | jq -r '.InvokeId')
+          echo "InvokeId: ${INVOKE_ID}"
+
+          for i in $(seq 1 90); do
+            sleep 20
+            RESULT=$(aliyun ecs DescribeInvocationResults \
+              --RegionId "${ECS_REGION}" \
+              --InvokeId "${INVOKE_ID}")
+            STATUS=$(echo "${RESULT}" | \
+              jq -r '.Invocation.InvocationResults.InvocationResult[0].InvocationStatus')
+            echo "[${i}] Status: ${STATUS}"
+            if [ "${STATUS}" != "Running" ]; then
+              OUTPUT=$(echo "${RESULT}" | \
+                jq -r '.Invocation.InvocationResults.InvocationResult[0].Output // ""' | \
+                base64 -d 2>/dev/null || echo "(no output)")
+              echo "${OUTPUT}"
+              if [ "${STATUS}" = "Success" ]; then
+                echo "Deployment successful!"
+                exit 0
+              else
+                echo "::error::Deployment failed with status: ${STATUS}"
+                exit 1
+              fi
+            fi
+          done
+          echo "::error::Deployment timed out"
+          exit 1
