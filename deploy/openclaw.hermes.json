@@ -1,0 +1,40 @@
+{
+  "$schema": "https://docs.openclaw.ai/schema/config.json",
+  "_comment": [
+    "Merge this into your ~/.openclaw/openclaw.json to register hermes-agent",
+    "as a custom model provider. OpenClaw routes conversations to hermes-agent",
+    "via its OpenAI-compatible API at http://hermes-agent:8642/v1.",
+    "",
+    "Replace HERMES_API_SERVER_KEY with the same key set in deploy/.env."
+  ],
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "hermes": {
+        "baseUrl": "http://hermes-agent:8642/v1",
+        "apiKey": "${HERMES_API_SERVER_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "request": {
+          "allowPrivateNetwork": true
+        },
+        "models": [
+          {
+            "id": "hermes-agent",
+            "name": "Hermes Agent (local)",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 128000,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  }
+}
