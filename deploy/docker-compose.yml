@@ -1,0 +1,134 @@
+#
+# Combined Docker Compose: OpenClaw Gateway + Hermes Agent
+#
+# Runs the OpenClaw TypeScript gateway alongside the hermes-agent Python
+# AI backend on a shared Docker network. OpenClaw routes conversations
+# to hermes-agent via its OpenAI-compatible API.
+#
+# Usage:
+#   cp deploy/.env.example deploy/.env   # fill in secrets
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Architecture:
+#   ┌─────────────────┐       ┌──────────────────┐
+#   │  OpenClaw GW    │──────▶│  hermes-agent    │
+#   │  (TS, :18789)   │ HTTP  │  (Python, :8642) │
+#   │  channels:      │       │  /v1/chat/compl.  │
+#   │  telegram,      │       │  /v1/responses    │
+#   │  discord, etc.  │       │  /v1/models       │
+#   └─────────────────┘       └──────────────────┘
+#         │                          │
+#    ports 18789,18790          port 8642
+#    (host-exposed)          (internal only)
+#
+# The openclaw-gateway container needs an openclaw.json that registers
+# hermes-agent as a custom provider. See deploy/openclaw.hermes.json
+# for a ready-to-use config snippet.
+#
+
+services:
+  # ── OpenClaw Gateway (TypeScript) ──────────────────────────────
+  openclaw-gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ${OPENCLAW_IMAGE:-openclaw:local}
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    networks:
+      - openclaw-net
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      TERM: xterm-256color
+      NODE_ENV: production
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - "${OPENCLAW_CONFIG_DIR:-${HOME:-/tmp}/.openclaw}:/home/node/.openclaw"
+      - "${OPENCLAW_WORKSPACE_DIR:-${HOME:-/tmp}/.openclaw/workspace}:/home/node/.openclaw/workspace"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      hermes-agent:
+        condition: service_healthy
+    init: true
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
+        "--port",
+        "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Hermes Agent (Python) ──────────────────────────────────────
+  # Exposes an OpenAI-compatible API that OpenClaw routes to via
+  # models.providers config (baseUrl: http://hermes-agent:8642/v1).
+  hermes-agent:
+    build:
+      context: ../hermes-agent
+      dockerfile: Dockerfile
+    image: ${HERMES_IMAGE:-hermes-agent:local}
+    container_name: hermes-agent
+    restart: unless-stopped
+    networks:
+      - openclaw-net
+    # Port 8642 is only exposed on the internal network by default.
+    # Uncomment the ports block below to expose it on the host for
+    # direct API access or debugging.
+    # ports:
+    #   - "${HERMES_API_PORT:-8642}:8642"
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_PORT=8642
+      - API_SERVER_KEY=${HERMES_API_SERVER_KEY:?Set HERMES_API_SERVER_KEY in .env}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - "${HERMES_DATA_DIR:-${HOME:-/tmp}/.hermes}:/opt/data"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    command: ["gateway", "run"]
+
+networks:
+  openclaw-net:
+    driver: bridge
